@@ -1,0 +1,316 @@
+#!/usr/bin/env python3
+"""
+Camera controller utility
+
+This script allows to control essential functions of some network cameras:
+    * tally control through "tally_enable" and "tally_disable"
+    * preset control through "preset_call"
+
+For convenience, it also lists the available RTSP urls served by the cameras.
+
+Note: when a feature is not available on a camera, a `NotImplementedError` is raised.
+
+To add support for more cameras you have to which inherits from the manufacturer parent class and register it with a human readable name
+
+    @register('Sony-Nex-Gen-Cam')
+    class ManufacturerModel(SonyGeneric):
+        has_tally = False
+        api_url_pattern = 'http://{ip}/...'
+        rtsp_urls_pattern = ('rtsp://{ip}/...', 'rtps://{ip}/...)
+
+        # for specific implementations, override the default method
+        def _do_set_tally(self, args):
+            # per camera method
+
+"""
+
+import sys
+import requests
+from requests.auth import HTTPDigestAuth, HTTPBasicAuth
+import logging
+
+camera_registry = dict()
+
+
+def register(name):
+    def wrapper(cls):
+        camera_registry[name] = cls
+        cls.name = name
+        return cls
+    return wrapper
+
+
+def setup_logging(verbose=False):
+    logging.addLevelName(logging.ERROR, "\033[1;31m%s\033[1;0m" % logging.getLevelName(logging.ERROR))
+    logging.addLevelName(logging.WARNING, "\033[1;33m%s\033[1;0m" % logging.getLevelName(logging.WARNING))
+    level = getattr(logging, 'DEBUG' if verbose else 'INFO')
+    logging.basicConfig(
+        level=level,
+        format="%(asctime)s %(levelname)-8s %(message)s",
+    )
+
+
+class BaseCamera:
+    name = "Unknown"
+    has_tally = True
+    rtsp_urls_pattern = ()
+    api_url_pattern = ""
+
+    def __init__(self, args):
+        self.args = args
+        self.auth = None
+        self.url_prefix = self.api_url_pattern.format(ip=args.ip)
+        self.rtsp_urls = tuple(rtsp.format(ip=args.ip) for rtsp in
+                               self.rtsp_urls_pattern)
+
+    def _do_first_auth_request(self, url):
+        logging.debug(f'First authentication request for {url}')
+
+        # on explicit "--auth" option no fallback (only test one auth) otherwise
+        # get the preferred per-class authentication methods (can be overridden
+        # by child class)
+        if self.args.auth == 'auto':
+            auth_methods = self._get_preferred_auth_methods()
+        else:
+            auth_methods = (self.args.auth,)
+
+        auth_map = {
+            'basic': HTTPBasicAuth(self.args.user, self.args.password),
+            'digest': HTTPDigestAuth(self.args.user, self.args.password),
+        }
+
+        fallback = False
+        for auth in auth_methods:
+            try:
+                r = requests.get(url, auth=auth_map[auth], timeout=self.args.timeout)
+                logging.info(f'Request succeeded with HTTP code {r.status_code}')
+                r.raise_for_status()
+            except requests.exceptions.HTTPError as err:
+                if err.response.status_code in (401, 403):
+                    logging.warning(f'"{auth}" authentication failure: {err}')
+                    fallback = True
+                else:
+                    raise
+            else:
+                if fallback:
+                    logging.warning(f'"{auth}" fallback success, please use "--auth={auth}" or set the {auth} as default authentication method in the camera class')
+                self.auth = auth
+                return r
+
+        sys.exit(1)
+
+    def _get_preferred_auth_methods(self):
+        return ('digest', 'basic')
+
+    def _need_auth(self):
+        return self.args.user and self.args.password and not self.auth
+
+    def _do_request(self, url):
+        logging.debug(f'Calling {url}')
+        if self._need_auth():
+            r = self._do_first_auth_request(url)
+        else:
+            r = requests.get(url, auth=self.auth, timeout=self.args.timeout)
+        r.raise_for_status()
+
+    def _do_set_tally(self, _):
+        raise NotImplementedError
+
+    def _do_preset_call(self, _):
+        raise NotImplementedError
+
+    # public commands
+
+    def cmd_tally_enable(self, _):
+        logging.info('Enabling tally')
+        if self.has_tally:
+            self._do_set_tally(True)
+        else:
+            logging.warning(f'{self.name} does not support tally')
+
+    def cmd_tally_disable(self, _):
+        logging.info('Disabling tally')
+        if self.has_tally:
+            self._do_set_tally(False)
+        else:
+            logging.warning(f'{self.name} does not support tally')
+
+    def cmd_preset_call(self, args):
+        if not args:
+            logging.error('Missing preset id')
+            sys.exit(1)
+        if not args[0].isnumeric():
+            logging.error('Numeric preset id expected')
+            sys.exit(1)
+        preset = args[0]
+        logging.info(f'Calling preset {preset}')
+        self._do_preset_call(preset)
+
+    def cmd_list_rtsp_urls(self, _):
+        if self.rtsp_urls:
+            print(f'{self.name} provides the following RTSP stream:')
+            for stream in self.rtsp_urls:
+                print(f'\t* {stream}')
+        else:
+            print(f'{self.name} has no RTSP stream declared')
+
+
+# Sony cameras
+##############
+
+@register('Sony-Generic')
+class SonyGeneric(BaseCamera):
+    """
+    This class implements the most common pattern (rtsp url, command adress,
+    ...) of Sony camera.
+    Camera that have a different behavior shall have a dedicated class which
+    inherits from this one
+    """
+
+    api_url_pattern = 'http://{ip}/command/'
+    rtsp_urls_pattern = ('rtsp://{ip}/media/video1',)
+
+    def _do_set_tally(self, enabled):
+        url = self.url_prefix + f'tally.cgi?TallyControl={"on" if enabled else "off"}'
+        self._do_request(url)
+
+    def _do_preset_call(self, preset):
+        url = self.url_prefix + f'presetposition.cgi?PresetCall={preset},24'
+        self._do_request(url)
+
+
+@register("Sony-SRG-XB25")
+class SonySRGXB25(SonyGeneric):
+    """
+    ref: https://pro.sony/support/res/manuals/F161/7dc73ca7b7ef7d26677e849f29c7c7fc/F1611001M.pdf
+    """
+    rtsp_urls_pattern = (
+        'rtsp://{ip}:8557/h264',
+        'rtsp://{ip}:8556/h264',
+    )
+
+
+@register("Sony-SRG-360SHE")
+class SonySRG360SHE(SonyGeneric):
+    """
+    ref: ref: https://pro.sony/s3/2020/02/19135945/SRG-360SHE_CGI-Command-List.zip
+    """
+    def _do_set_tally(self, enabled):
+        url = self.url_prefix + f'camera.cgi?tally={"on" if enabled else "off"}'
+        self._do_request(url)
+
+
+@register("Sony-SRG-300SE")
+class SonySRG300SE(SonyGeneric):
+    """
+    ref: same as SRG-360SHE but without tally control (= Generic)
+    """
+    has_tally = False
+
+
+@register("Sony-SRG-X400")
+class SonySRGX400(SonyGeneric):
+    """
+    Same as Generic
+    """
+    has_tally = False
+
+
+# Panasonic cameras
+###################
+
+@register("Panasonic-Generic")
+class PanasonicCam(BaseCamera):
+    """
+    refs: https://eww.pass.panasonic.co.jp/pro-av/support/content/guide/DEF/HE50_120_IP/HDIntegratedCamera_InterfaceSpecifications-E.pdf
+    """
+    api_url_pattern = 'http://{ip}/cgi-bin/'
+    rtsp_urls = ('rtsp://{ip}:554/mediainput/h264/stream_1',)
+
+    def _do_set_tally(self, enabled):
+        url = self.url_prefix + f'aw_ptz?cmd=%23DA{1 if enabled else 0}&res=1'
+        self._do_request(url)
+
+    def _do_preset_call(self, preset):
+        assert preset in range(100)
+        url = self.url_prefix + f'aw_ptz?cmd=%23R{preset:02}&res=1'
+        self._do_request(url)
+
+
+if __name__ == '__main__':
+    import argparse
+
+    parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+    parser.add_argument(
+        '-v',
+        '--verbose',
+        help='set verbosity to DEBUG',
+        action='store_true',
+    )
+    parser.add_argument(
+        '--ip',
+        type=str,
+        required=True,
+        help='ip of device',
+    )
+    parser.add_argument(
+        '--user',
+        type=str,
+        help='username',
+    )
+    parser.add_argument(
+        '--password',
+        type=str,
+        help='password',
+    )
+    parser.add_argument(
+        '--model',
+        type=str,
+        required=True,
+        choices=camera_registry.keys(),
+        help='camera model',
+    )
+    parser.add_argument(
+        '--auth',
+        type=str,
+        choices=['auto', 'basic', 'digest'],
+        help='HTTP authentication method',
+        default='auto',
+    )
+    parser.add_argument(
+        'command',
+        type=str,
+        choices=["tally_enable", "tally_disable", "preset_call", "list_rtsp_urls"],
+        help='command'
+    )
+    parser.add_argument(
+        'command_args',
+        type=str,
+        metavar='command-args',
+        nargs='*',
+        help='optional command arguments',
+    )
+    parser.add_argument(
+        '--timeout',
+        type=float,
+        help='Request timeout in seconds',
+        default=3,
+    )
+
+    args = parser.parse_args()
+    setup_logging(args.verbose)
+
+    model = args.model
+
+    c = camera_registry[model](args)
+
+    if args.verbose:
+        logging.basicConfig(level=logging.DEBUG)
+
+    try:
+        method = getattr(c, 'cmd_' + args.command)
+    except AttributeError:
+        logging.error(f'Unsupported command "{args.command}" for model {model}')
+        sys.exit(1)
+
+    method(args.command_args)
