@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Camera controller utility
+Camera controller utility - https://github.com/UbiCastTeam/pycamctl
 
 This script allows to control essential functions of some network cameras:
     * tally control through "tally_enable" and "tally_disable"
