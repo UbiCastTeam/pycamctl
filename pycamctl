@@ -294,7 +294,7 @@ if __name__ == '__main__':
         '--timeout',
         type=float,
         help='Request timeout in seconds',
-        default=3,
+        default=5,
     )
 
     args = parser.parse_args()
