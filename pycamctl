@@ -232,6 +232,7 @@ class PanasonicCam(BaseCamera):
         self._do_request(url)
 
     def _do_preset_call(self, preset):
+        preset = int(preset)
         assert preset in range(100)
         url = self.url_prefix + f'aw_ptz?cmd=%23R{preset:02}&res=1'
         self._do_request(url)
