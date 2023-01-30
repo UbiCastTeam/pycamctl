@@ -225,7 +225,7 @@ class PanasonicCam(BaseCamera):
     refs: https://eww.pass.panasonic.co.jp/pro-av/support/content/guide/DEF/HE50_120_IP/HDIntegratedCamera_InterfaceSpecifications-E.pdf
     """
     api_url_pattern = 'http://{ip}/cgi-bin/'
-    rtsp_urls_pattern = ('rtsp://{ip}:554/mediainput/h264/stream_1',)
+    rtsp_urls_pattern = ('rtsp://{ip}:554/MediaInput/h264/stream_1',)
 
     def _do_set_tally(self, enabled):
         url = self.url_prefix + f'aw_ptz?cmd=%23DA{1 if enabled else 0}&res=1'
